@@ -8,7 +8,7 @@ import re
 from typing import Annotated
 
 from fastmcp import FastMCP
-from pydantic import Field
+from pydantic import BaseModel, Field
 
 from papers_mcp.domain import (
     Paper,
@@ -21,7 +21,95 @@ from papers_mcp.service import (
     search_papers,
 )
 
-# Initialize the MCP server
+# =============================================================================
+# Response Models with Field Annotations
+# =============================================================================
+
+
+class AuthorResponse(BaseModel):
+    """Author information."""
+
+    author_id: str | None = Field(
+        description="Unique Semantic Scholar author identifier."
+    )
+    name: str = Field(description="Author's display name.")
+
+
+class PaperSummary(BaseModel):
+    """Summary of a paper for search results."""
+
+    paper_id: str = Field(
+        description="Semantic Scholar paper ID. Use with get_paper for full details."
+    )
+    title: str = Field(description="Title of the paper.")
+    authors: list[AuthorResponse] = Field(description="List of paper authors.")
+    year: int | None = Field(description="Publication year.")
+    venue: str | None = Field(description="Publication venue (journal/conference).")
+    citation_count: int = Field(description="Total number of citations.")
+    abstract_snippet: str | None = Field(
+        description="First 300 characters of the abstract."
+    )
+    pdf_url: str | None = Field(
+        description="Direct URL to download the paper PDF (open access)."
+    )
+
+
+class SearchResponse(BaseModel):
+    """Response from paper search."""
+
+    query: str = Field(description="The search query that was executed.")
+    total: int = Field(description="Total number of matching papers.")
+    papers: list[PaperSummary] = Field(description="List of matching papers.")
+    offset: int = Field(description="Current pagination offset.")
+    next_offset: int | None = Field(
+        description="Offset for next page of results. None if no more results."
+    )
+
+
+class PaperDetailsResponse(BaseModel):
+    """Detailed information about a paper."""
+
+    paper_id: str = Field(description="Semantic Scholar paper ID.")
+    title: str = Field(description="Title of the paper.")
+    authors: list[AuthorResponse] = Field(description="List of all paper authors.")
+    year: int | None = Field(description="Publication year.")
+    venue: str | None = Field(description="Publication venue (journal/conference).")
+    citation_count: int = Field(description="Total number of citations.")
+    influential_citation_count: int = Field(
+        description="Number of influential citations (highly relevant citations)."
+    )
+    references_count: int = Field(description="Number of references in the paper.")
+    abstract: str | None = Field(description="Full abstract text.")
+    tldr: str | None = Field(
+        description="AI-generated one-sentence summary of the paper."
+    )
+    fields_of_study: list[str] = Field(
+        description="Academic fields this paper belongs to."
+    )
+    publication_types: list[str] = Field(
+        description="Types of publication (e.g., Journal Article, Conference)."
+    )
+    external_ids: dict[str, str] = Field(
+        description="External identifiers: DOI, ArXiv, PubMed, etc."
+    )
+    url: str = Field(description="Semantic Scholar URL for this paper.")
+    pdf_url: str | None = Field(
+        description="Direct URL to download the paper PDF (open access)."
+    )
+
+
+class ErrorResponse(BaseModel):
+    """Error response from the API."""
+
+    error: bool = Field(default=True, description="Indicates this is an error.")
+    code: str = Field(description="Error code (e.g., 'rate_limit', 'not_found').")
+    message: str = Field(description="Human-readable error message.")
+
+
+# =============================================================================
+# Initialize MCP Server
+# =============================================================================
+
 mcp = FastMCP(
     "papers",
     instructions=(
@@ -32,92 +120,9 @@ mcp = FastMCP(
 )
 
 
-def format_paper_summary(paper: Paper) -> str:
-    """Format a paper as a concise summary for search results.
-
-    Args:
-        paper: Paper to format.
-
-    Returns:
-        Formatted paper summary string.
-    """
-    lines = [f"**{paper.title}**"]
-
-    if paper.authors:
-        author_names = ", ".join(a.name for a in paper.authors[:3])
-        if len(paper.authors) > 3:
-            author_names += f" et al. ({len(paper.authors)} authors)"
-        lines.append(f"Authors: {author_names}")
-
-    meta = []
-    if paper.year:
-        meta.append(str(paper.year))
-    if paper.venue:
-        meta.append(paper.venue)
-    meta.append(f"{paper.citation_count} citations")
-    lines.append(" | ".join(meta))
-
-    if paper.abstract:
-        abstract = paper.abstract[:300]
-        if len(paper.abstract) > 300:
-            abstract += "..."
-        lines.append(f"Abstract: {abstract}")
-
-    lines.append(f"ID: {paper.paper_id}")
-    if paper.open_access_pdf:
-        lines.append(f"PDF: {paper.open_access_pdf}")
-
-    return "\n".join(lines)
-
-
-def format_paper_details(details: PaperDetails) -> str:
-    """Format detailed paper information.
-
-    Args:
-        details: Paper details to format.
-
-    Returns:
-        Formatted paper details string.
-    """
-    paper = details.paper
-    lines = [f"# {paper.title}"]
-
-    if paper.authors:
-        author_names = ", ".join(a.name for a in paper.authors)
-        lines.append(f"\n**Authors:** {author_names}")
-
-    meta = []
-    if paper.year:
-        meta.append(f"Year: {paper.year}")
-    if paper.venue:
-        meta.append(f"Venue: {paper.venue}")
-    meta.append(f"Citations: {paper.citation_count}")
-    meta.append(f"Influential citations: {details.influential_citation_count}")
-    meta.append(f"References: {details.references_count}")
-    if meta:
-        lines.append(" | ".join(meta))
-
-    if details.tldr:
-        lines.append(f"\n**TLDR:** {details.tldr}")
-
-    if paper.abstract:
-        lines.append(f"\n**Abstract:**\n{paper.abstract}")
-
-    if details.fields_of_study:
-        lines.append(f"\n**Fields:** {', '.join(details.fields_of_study)}")
-
-    if details.publication_types:
-        lines.append(f"**Type:** {', '.join(details.publication_types)}")
-
-    if details.external_ids:
-        ids = [f"{k}: {v}" for k, v in details.external_ids.items()]
-        lines.append("\n**External IDs:**\n" + "\n".join(ids))
-
-    lines.append(f"\n**Semantic Scholar URL:** {paper.url}")
-    if paper.open_access_pdf:
-        lines.append(f"**Open Access PDF:** {paper.open_access_pdf}")
-
-    return "\n".join(lines)
+# =============================================================================
+# Helper Functions
+# =============================================================================
 
 
 def detect_id_type(paper_id: str) -> str:
@@ -153,13 +158,78 @@ def detect_id_type(paper_id: str) -> str:
     return paper_id
 
 
-async def search_papers_tool(
+def paper_to_summary(paper: Paper) -> PaperSummary:
+    """Convert domain Paper to PaperSummary response.
+
+    Args:
+        paper: Domain paper object.
+
+    Returns:
+        PaperSummary response model.
+    """
+    abstract_snippet = None
+    if paper.abstract:
+        abstract_snippet = paper.abstract[:300]
+        if len(paper.abstract) > 300:
+            abstract_snippet += "..."
+
+    return PaperSummary(
+        paper_id=paper.paper_id,
+        title=paper.title,
+        authors=[
+            AuthorResponse(author_id=a.author_id, name=a.name) for a in paper.authors
+        ],
+        year=paper.year,
+        venue=paper.venue,
+        citation_count=paper.citation_count,
+        abstract_snippet=abstract_snippet,
+        pdf_url=paper.open_access_pdf,
+    )
+
+
+def details_to_response(details: PaperDetails) -> PaperDetailsResponse:
+    """Convert domain PaperDetails to PaperDetailsResponse.
+
+    Args:
+        details: Domain paper details object.
+
+    Returns:
+        PaperDetailsResponse response model.
+    """
+    paper = details.paper
+    return PaperDetailsResponse(
+        paper_id=paper.paper_id,
+        title=paper.title,
+        authors=[
+            AuthorResponse(author_id=a.author_id, name=a.name) for a in paper.authors
+        ],
+        year=paper.year,
+        venue=paper.venue,
+        citation_count=paper.citation_count,
+        influential_citation_count=details.influential_citation_count,
+        references_count=details.references_count,
+        abstract=paper.abstract,
+        tldr=details.tldr,
+        fields_of_study=list(details.fields_of_study),
+        publication_types=list(details.publication_types),
+        external_ids=dict(details.external_ids),
+        url=paper.url,
+        pdf_url=paper.open_access_pdf,
+    )
+
+
+# =============================================================================
+# Tool Implementation Functions (for testing)
+# =============================================================================
+
+
+async def search_papers_impl(
     query: str,
     limit: int = 10,
     year_start: int | None = None,
     year_end: int | None = None,
     offset: int = 0,
-) -> str:
+) -> SearchResponse | ErrorResponse:
     """Search academic papers by relevance.
 
     Args:
@@ -170,7 +240,7 @@ async def search_papers_tool(
         offset: Pagination offset.
 
     Returns:
-        Formatted search results string.
+        SearchResponse on success, ErrorResponse on failure.
     """
     search_query = SearchQuery(
         query=query,
@@ -183,44 +253,40 @@ async def search_papers_tool(
     result = await search_papers(search_query)
 
     if isinstance(result, ServiceError):
-        return f"Error ({result.code}): {result.message}"
+        return ErrorResponse(code=result.code, message=result.message)
 
-    if result.total == 0:
-        return f"No papers found for query: {query}"
-
-    lines = [f'Found {result.total} papers for "{query}":\n']
-
-    for i, paper in enumerate(result.papers, 1):
-        lines.append(f"## {i}. {format_paper_summary(paper)}\n")
-
-    if result.next_offset:
-        lines.append(
-            f"---\nShowing {len(result.papers)} of {result.total}. "
-            f"Use offset={result.next_offset} for more results."
-        )
-
-    return "\n".join(lines)
+    return SearchResponse(
+        query=query,
+        total=result.total,
+        papers=[paper_to_summary(p) for p in result.papers],
+        offset=result.offset,
+        next_offset=result.next_offset,
+    )
 
 
-async def get_paper_tool(paper_id: str) -> str:
+async def get_paper_impl(paper_id: str) -> PaperDetailsResponse | ErrorResponse:
     """Get detailed information about a specific paper.
 
     Args:
         paper_id: Paper identifier (Semantic Scholar ID, DOI, ArXiv ID, etc.).
 
     Returns:
-        Formatted paper details string.
+        PaperDetailsResponse on success, ErrorResponse on failure.
     """
     normalized_id = detect_id_type(paper_id)
     result = await get_paper_details(normalized_id)
 
     if isinstance(result, ServiceError):
-        return f"Error ({result.code}): {result.message}"
+        return ErrorResponse(code=result.code, message=result.message)
 
-    return format_paper_details(result)
+    return details_to_response(result)
 
 
-# MCP tool registrations with optimized signatures for AI agents
+# =============================================================================
+# MCP Tool Registrations
+# =============================================================================
+
+
 @mcp.tool(
     annotations={
         "title": "Search Papers",
@@ -275,14 +341,14 @@ async def search_papers_mcp(
             ge=0,
         ),
     ] = 0,
-) -> str:
+) -> SearchResponse | ErrorResponse:
     """Search academic papers by relevance.
 
     Returns papers matching the query ranked by relevance. Each result includes
     title, authors, year, citation count, abstract preview, and paper ID.
     Use the paper ID with get_paper for full details.
     """
-    return await search_papers_tool(query, limit, year_start, year_end, offset)
+    return await search_papers_impl(query, limit, year_start, year_end, offset)
 
 
 @mcp.tool(
@@ -305,14 +371,14 @@ async def get_paper_mcp(
             max_length=200,
         ),
     ],
-) -> str:
+) -> PaperDetailsResponse | ErrorResponse:
     """Get detailed information about a specific paper.
 
     Returns comprehensive paper details including full abstract, TLDR summary,
     citation metrics, fields of study, external IDs (DOI, ArXiv), and PDF link
     if available.
     """
-    return await get_paper_tool(paper_id)
+    return await get_paper_impl(paper_id)
 
 
 def main() -> None:
