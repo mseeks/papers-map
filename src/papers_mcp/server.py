@@ -4,6 +4,7 @@ This module exposes paper search and retrieval tools via the Model Context Proto
 Tool names and descriptions are optimized for AI agent usage.
 """
 
+import os
 import re
 from typing import Annotated
 
@@ -20,6 +21,9 @@ from papers_mcp.service import (
     get_paper_details,
     search_papers,
 )
+
+# API key from environment variable for higher rate limits
+S2_API_KEY: str | None = os.environ.get("S2_API_KEY")
 
 # =============================================================================
 # Response Models with Field Annotations
@@ -212,7 +216,7 @@ def details_to_response(details: PaperDetails) -> PaperDetailsResponse:
         tldr=details.tldr,
         fields_of_study=list(details.fields_of_study),
         publication_types=list(details.publication_types),
-        external_ids=dict(details.external_ids),
+        external_ids={k: str(v) for k, v in details.external_ids.items()},
         url=paper.url,
         pdf_url=paper.open_access_pdf,
     )
@@ -250,7 +254,7 @@ async def search_papers_impl(
         year_end=year_end,
     )
 
-    result = await search_papers(search_query)
+    result = await search_papers(search_query, api_key=S2_API_KEY)
 
     if isinstance(result, ServiceError):
         return ErrorResponse(code=result.code, message=result.message)
@@ -274,7 +278,7 @@ async def get_paper_impl(paper_id: str) -> PaperDetailsResponse | ErrorResponse:
         PaperDetailsResponse on success, ErrorResponse on failure.
     """
     normalized_id = detect_id_type(paper_id)
-    result = await get_paper_details(normalized_id)
+    result = await get_paper_details(normalized_id, api_key=S2_API_KEY)
 
     if isinstance(result, ServiceError):
         return ErrorResponse(code=result.code, message=result.message)
