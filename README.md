@@ -27,6 +27,22 @@ Or directly:
 uv run papers-mcp
 ```
 
+For verbose logging:
+
+```bash
+make serve-debug   # or: uv run papers-mcp --debug
+```
+
+### Configuration
+
+Set `S2_API_KEY` to a [Semantic Scholar API key](https://www.semanticscholar.org/product/api)
+for higher rate limits. Without it, the shared public rate limit applies and
+requests are automatically retried with exponential backoff:
+
+```bash
+export S2_API_KEY="your-key"
+```
+
 ### Development
 
 ```bash
@@ -54,7 +70,8 @@ Search for academic papers based on a query. Returns relevant papers with titles
 
 ### `get_paper`
 
-Retrieve detailed information about a specific paper by its Semantic Scholar ID.
+Retrieve detailed information about a specific paper by ID (Semantic Scholar ID,
+DOI, or ArXiv ID).
 
 ## Architecture
 

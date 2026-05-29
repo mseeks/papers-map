@@ -4,6 +4,7 @@ These tests follow TDD principles - written before implementation.
 Uses pytest-httpx for mocking HTTP requests.
 """
 
+import httpx
 import pytest
 
 from papers_mcp.domain import (
@@ -14,6 +15,8 @@ from papers_mcp.domain import (
     ServiceError,
 )
 from papers_mcp.service import (
+    RetryConfig,
+    _build_search_url,
     get_paper_details,
     parse_paper,
     parse_paper_details,
@@ -253,3 +256,198 @@ class TestGetPaperDetails:
         result = await get_paper_details("DOI:10.5555/3295222.3295349")
 
         assert isinstance(result, PaperDetails)
+
+
+class TestRetryConfig:
+    """Tests for RetryConfig.delay_for backoff math."""
+
+    def test_exponential_backoff_without_jitter(self) -> None:
+        """Delay doubles each attempt when jitter is disabled."""
+        cfg = RetryConfig(base_delay=5.0, max_delay=60.0, jitter=0.0)
+
+        assert cfg.delay_for(0) == 5.0
+        assert cfg.delay_for(1) == 10.0
+        assert cfg.delay_for(2) == 20.0
+        assert cfg.delay_for(3) == 40.0
+
+    def test_delay_caps_at_max_delay(self) -> None:
+        """Delay never exceeds max_delay regardless of attempt."""
+        cfg = RetryConfig(base_delay=5.0, max_delay=60.0, jitter=0.0)
+
+        assert cfg.delay_for(4) == 60.0  # 80 capped to 60
+        assert cfg.delay_for(20) == 60.0
+
+    def test_jitter_stays_within_bounds(self) -> None:
+        """Jitter only ever adds 0-50% on top of the base delay."""
+        cfg = RetryConfig(base_delay=10.0, max_delay=60.0, jitter=0.5)
+
+        for attempt in range(6):
+            base = min(10.0 * 2.0**attempt, 60.0)
+            delay = cfg.delay_for(attempt)
+            assert base <= delay <= base * 1.5
+
+
+class TestRetryBehavior:
+    """Tests for the retry/backoff loop in _make_request_with_retry."""
+
+    @pytest.mark.asyncio
+    async def test_retries_then_succeeds_on_rate_limit(self, httpx_mock) -> None:  # type: ignore[no-untyped-def]
+        """Retry on 429 and return the result once the API recovers."""
+        httpx_mock.add_response(status_code=429)
+        httpx_mock.add_response(status_code=429)
+        httpx_mock.add_response(json=SAMPLE_SEARCH_RESPONSE)
+
+        delays: list[float] = []
+
+        async def fake_sleep(delay: float) -> None:
+            delays.append(delay)
+
+        cfg = RetryConfig(max_retries=5, base_delay=1.0, max_delay=4.0, jitter=0.0)
+        result = await search_papers(
+            SearchQuery(query="x"), retry_config=cfg, sleep=fake_sleep
+        )
+
+        assert isinstance(result, SearchResult)
+        assert result.total == 100
+        assert delays == [1.0, 2.0]  # slept before each of the two retries
+
+    @pytest.mark.asyncio
+    async def test_exhausts_retries_on_persistent_rate_limit(self, httpx_mock) -> None:  # type: ignore[no-untyped-def]
+        """Give up with a rate_limit error after exhausting attempts."""
+        for _ in range(3):
+            httpx_mock.add_response(status_code=429)
+
+        delays: list[float] = []
+
+        async def fake_sleep(delay: float) -> None:
+            delays.append(delay)
+
+        cfg = RetryConfig(max_retries=3, base_delay=1.0, max_delay=10.0, jitter=0.0)
+        result = await search_papers(
+            SearchQuery(query="x"), retry_config=cfg, sleep=fake_sleep
+        )
+
+        assert isinstance(result, ServiceError)
+        assert result.code == "rate_limit"
+        assert delays == [1.0, 2.0]  # no sleep after the final attempt
+
+    @pytest.mark.asyncio
+    async def test_timeout_retries_then_fails(self, httpx_mock) -> None:  # type: ignore[no-untyped-def]
+        """Retry on timeout and return a timeout error when it persists."""
+        httpx_mock.add_exception(httpx.TimeoutException("timeout"))
+        httpx_mock.add_exception(httpx.TimeoutException("timeout"))
+
+        delays: list[float] = []
+
+        async def fake_sleep(delay: float) -> None:
+            delays.append(delay)
+
+        cfg = RetryConfig(max_retries=2, base_delay=1.0, max_delay=10.0, jitter=0.0)
+        result = await search_papers(
+            SearchQuery(query="x"), retry_config=cfg, sleep=fake_sleep
+        )
+
+        assert isinstance(result, ServiceError)
+        assert result.code == "timeout"
+        assert delays == [1.0]
+
+    @pytest.mark.asyncio
+    async def test_timeout_then_success(self, httpx_mock) -> None:  # type: ignore[no-untyped-def]
+        """Recover and return a result when a timeout is followed by success."""
+        httpx_mock.add_exception(httpx.TimeoutException("timeout"))
+        httpx_mock.add_response(json=SAMPLE_SEARCH_RESPONSE)
+
+        delays: list[float] = []
+
+        async def fake_sleep(delay: float) -> None:
+            delays.append(delay)
+
+        cfg = RetryConfig(max_retries=3, base_delay=1.0, max_delay=10.0, jitter=0.0)
+        result = await search_papers(
+            SearchQuery(query="x"), retry_config=cfg, sleep=fake_sleep
+        )
+
+        assert isinstance(result, SearchResult)
+        assert delays == [1.0]
+
+    @pytest.mark.asyncio
+    async def test_server_error_is_not_retried(self, httpx_mock) -> None:  # type: ignore[no-untyped-def]
+        """5xx responses fail fast without consuming retries."""
+        httpx_mock.add_response(status_code=503)
+
+        delays: list[float] = []
+
+        async def fake_sleep(delay: float) -> None:
+            delays.append(delay)
+
+        cfg = RetryConfig(max_retries=5, base_delay=1.0, jitter=0.0)
+        result = await search_papers(
+            SearchQuery(query="x"), retry_config=cfg, sleep=fake_sleep
+        )
+
+        assert isinstance(result, ServiceError)
+        assert result.code == "server_error"
+        assert delays == []  # no retries for server errors
+
+    @pytest.mark.asyncio
+    async def test_network_error_is_not_retried(self, httpx_mock) -> None:  # type: ignore[no-untyped-def]
+        """Connection errors surface immediately as network_error."""
+        httpx_mock.add_exception(httpx.ConnectError("boom"))
+
+        delays: list[float] = []
+
+        async def fake_sleep(delay: float) -> None:
+            delays.append(delay)
+
+        cfg = RetryConfig(max_retries=5, base_delay=1.0, jitter=0.0)
+        result = await search_papers(
+            SearchQuery(query="x"), retry_config=cfg, sleep=fake_sleep
+        )
+
+        assert isinstance(result, ServiceError)
+        assert result.code == "network_error"
+        assert delays == []
+
+    @pytest.mark.asyncio
+    async def test_unexpected_status_maps_to_api_error(self, httpx_mock) -> None:  # type: ignore[no-untyped-def]
+        """Unhandled status codes (e.g. 400) map to a generic api_error."""
+        httpx_mock.add_response(status_code=400)
+
+        cfg = RetryConfig(max_retries=2, base_delay=1.0, jitter=0.0)
+        result = await search_papers(SearchQuery(query="x"), retry_config=cfg)
+
+        assert isinstance(result, ServiceError)
+        assert result.code == "api_error"
+
+
+class TestBuildSearchUrl:
+    """Tests for search URL construction (encoding and filters)."""
+
+    def test_includes_core_params_and_fields(self) -> None:
+        """Core query/pagination params and requested fields are encoded."""
+        url = _build_search_url(SearchQuery(query="deep learning", limit=5, offset=10))
+
+        assert "query=deep+learning" in url
+        assert "limit=5" in url
+        assert "offset=10" in url
+        assert "fields=paperId%2Ctitle" in url
+
+    def test_year_start_only(self) -> None:
+        """A lower-bound-only year filter is encoded as ``2020-``."""
+        url = _build_search_url(SearchQuery(query="x", year_start=2020))
+
+        assert "year=2020-" in url
+
+    def test_year_end_only(self) -> None:
+        """An upper-bound-only year filter is encoded as ``-2024``."""
+        url = _build_search_url(SearchQuery(query="x", year_end=2024))
+
+        assert "year=-2024" in url
+
+    def test_multiple_fields_of_study_all_included(self) -> None:
+        """All fields_of_study are sent, not just the first (regression test)."""
+        url = _build_search_url(
+            SearchQuery(query="x", fields_of_study=("Computer Science", "Biology"))
+        )
+
+        assert "fieldsOfStudy=Computer+Science%2CBiology" in url

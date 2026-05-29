@@ -74,8 +74,7 @@ dmypy.json
 # ruff
 .ruff_cache/
 
-# uv
-uv.lock
+# uv: the lockfile is committed for reproducible installs
 
 # OS
 .DS_Store

@@ -4,6 +4,8 @@ This module exposes paper search and retrieval tools via the Model Context Proto
 Tool names and descriptions are optimized for AI agent usage.
 """
 
+import argparse
+import logging
 import os
 import re
 from typing import Annotated
@@ -11,15 +13,14 @@ from typing import Annotated
 from fastmcp import FastMCP
 from pydantic import BaseModel, Field
 
+from papers_mcp import service
 from papers_mcp.domain import (
+    DEFAULT_SEARCH_LIMIT,
+    MAX_SEARCH_LIMIT,
     Paper,
     PaperDetails,
     SearchQuery,
     ServiceError,
-)
-from papers_mcp.service import (
-    get_paper_details,
-    search_papers,
 )
 
 # API key from environment variable for higher rate limits
@@ -229,7 +230,7 @@ def details_to_response(details: PaperDetails) -> PaperDetailsResponse:
 
 async def search_papers_impl(
     query: str,
-    limit: int = 10,
+    limit: int = DEFAULT_SEARCH_LIMIT,
     year_start: int | None = None,
     year_end: int | None = None,
     offset: int = 0,
@@ -248,13 +249,13 @@ async def search_papers_impl(
     """
     search_query = SearchQuery(
         query=query,
-        limit=min(max(1, limit), 100),
+        limit=min(max(1, limit), MAX_SEARCH_LIMIT),
         offset=offset,
         year_start=year_start,
         year_end=year_end,
     )
 
-    result = await search_papers(search_query, api_key=S2_API_KEY)
+    result = await service.search_papers(search_query, api_key=S2_API_KEY)
 
     if isinstance(result, ServiceError):
         return ErrorResponse(code=result.code, message=result.message)
@@ -278,7 +279,7 @@ async def get_paper_impl(paper_id: str) -> PaperDetailsResponse | ErrorResponse:
         PaperDetailsResponse on success, ErrorResponse on failure.
     """
     normalized_id = detect_id_type(paper_id)
-    result = await get_paper_details(normalized_id, api_key=S2_API_KEY)
+    result = await service.get_paper_details(normalized_id, api_key=S2_API_KEY)
 
     if isinstance(result, ServiceError):
         return ErrorResponse(code=result.code, message=result.message)
@@ -298,7 +299,7 @@ async def get_paper_impl(paper_id: str) -> PaperDetailsResponse | ErrorResponse:
         "openWorldHint": True,
     }
 )
-async def search_papers_mcp(
+async def search_papers(
     query: Annotated[
         str,
         Field(
@@ -316,9 +317,9 @@ async def search_papers_mcp(
         Field(
             description="Maximum papers to return. Default 10.",
             ge=1,
-            le=100,
+            le=MAX_SEARCH_LIMIT,
         ),
-    ] = 10,
+    ] = DEFAULT_SEARCH_LIMIT,
     year_start: Annotated[
         int | None,
         Field(
@@ -362,7 +363,7 @@ async def search_papers_mcp(
         "openWorldHint": True,
     }
 )
-async def get_paper_mcp(
+async def get_paper(
     paper_id: Annotated[
         str,
         Field(
@@ -386,7 +387,22 @@ async def get_paper_mcp(
 
 
 def main() -> None:
-    """Run the MCP server."""
+    """Run the MCP server.
+
+    Parses ``--debug`` to enable verbose logging, then starts the server over
+    stdio.
+    """
+    parser = argparse.ArgumentParser(description="Papers MCP server.")
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Enable debug-level logging.",
+    )
+    args = parser.parse_args()
+
+    # Logs go to stderr; stdout is reserved for the MCP protocol stream.
+    logging.basicConfig(level=logging.DEBUG if args.debug else logging.INFO)
+
     mcp.run()
 
 

@@ -3,9 +3,11 @@
 Tests the MCP tool functions for searching and retrieving papers.
 """
 
+import logging
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from fastmcp import Client
 
 from papers_mcp.domain import (
     Author,
@@ -22,6 +24,8 @@ from papers_mcp.server import (
     details_to_response,
     detect_id_type,
     get_paper_impl,
+    main,
+    mcp,
     paper_to_summary,
     search_papers_impl,
 )
@@ -191,7 +195,7 @@ class TestSearchPapersImpl:
     ) -> None:
         """Return SearchResponse on success."""
         with patch(
-            "papers_mcp.server.search_papers",
+            "papers_mcp.service.search_papers",
             new_callable=AsyncMock,
             return_value=sample_search_result,
         ):
@@ -209,7 +213,7 @@ class TestSearchPapersImpl:
         """Return ErrorResponse on API error."""
         error = ServiceError(code="rate_limit", message="Rate limit exceeded")
         with patch(
-            "papers_mcp.server.search_papers",
+            "papers_mcp.service.search_papers",
             new_callable=AsyncMock,
             return_value=error,
         ):
@@ -227,7 +231,7 @@ class TestSearchPapersImpl:
     ) -> None:
         """Pass all parameters to search function."""
         with patch(
-            "papers_mcp.server.search_papers",
+            "papers_mcp.service.search_papers",
             new_callable=AsyncMock,
             return_value=sample_search_result,
         ) as mock_search:
@@ -257,7 +261,7 @@ class TestSearchPapersImpl:
             next_offset=None,
         )
         with patch(
-            "papers_mcp.server.search_papers",
+            "papers_mcp.service.search_papers",
             new_callable=AsyncMock,
             return_value=empty_result,
         ):
@@ -278,7 +282,7 @@ class TestGetPaperImpl:
     ) -> None:
         """Return PaperDetailsResponse on success."""
         with patch(
-            "papers_mcp.server.get_paper_details",
+            "papers_mcp.service.get_paper_details",
             new_callable=AsyncMock,
             return_value=sample_paper_details,
         ):
@@ -295,7 +299,7 @@ class TestGetPaperImpl:
         """Return ErrorResponse when paper not found."""
         error = ServiceError(code="not_found", message="Paper not found")
         with patch(
-            "papers_mcp.server.get_paper_details",
+            "papers_mcp.service.get_paper_details",
             new_callable=AsyncMock,
             return_value=error,
         ):
@@ -312,7 +316,7 @@ class TestGetPaperImpl:
     ) -> None:
         """Normalize DOI by adding prefix."""
         with patch(
-            "papers_mcp.server.get_paper_details",
+            "papers_mcp.service.get_paper_details",
             new_callable=AsyncMock,
             return_value=sample_paper_details,
         ) as mock_get:
@@ -328,7 +332,7 @@ class TestGetPaperImpl:
     ) -> None:
         """Normalize ArXiv ID by adding prefix."""
         with patch(
-            "papers_mcp.server.get_paper_details",
+            "papers_mcp.service.get_paper_details",
             new_callable=AsyncMock,
             return_value=sample_paper_details,
         ) as mock_get:
@@ -336,3 +340,111 @@ class TestGetPaperImpl:
 
             call_args = mock_get.call_args[0][0]
             assert call_args == "ARXIV:1706.03762"
+
+
+class TestMcpServer:
+    """End-to-end smoke tests driving the server through an in-memory client."""
+
+    @pytest.mark.asyncio
+    async def test_tools_registered_with_expected_names(self) -> None:
+        """Both tools register under the bare (no _mcp suffix) names."""
+        async with Client(mcp) as client:
+            tools = await client.list_tools()
+
+        by_name = {tool.name: tool for tool in tools}
+        assert set(by_name) == {"search_papers", "get_paper"}
+
+        search = by_name["search_papers"]
+        assert search.annotations is not None
+        assert search.annotations.readOnlyHint is True
+        assert set(search.inputSchema["properties"]) >= {
+            "query",
+            "limit",
+            "year_start",
+            "year_end",
+            "offset",
+        }
+
+    @pytest.mark.asyncio
+    async def test_search_tool_returns_structured_data(
+        self,
+        sample_search_result: SearchResult,
+    ) -> None:
+        """Calling search_papers returns structured paper data."""
+        with patch(
+            "papers_mcp.service.search_papers",
+            new_callable=AsyncMock,
+            return_value=sample_search_result,
+        ):
+            async with Client(mcp) as client:
+                result = await client.call_tool(
+                    "search_papers", {"query": "transformer"}
+                )
+
+        assert result.is_error is False
+        first = result.data["papers"][0]
+        assert result.data["total"] == 100
+        assert first["title"] == "Attention Is All You Need"
+        assert first["pdf_url"] == "https://arxiv.org/pdf/1706.03762.pdf"
+
+    @pytest.mark.asyncio
+    async def test_get_paper_tool_returns_structured_data(
+        self,
+        sample_paper_details: PaperDetails,
+    ) -> None:
+        """Calling get_paper returns full structured details."""
+        with patch(
+            "papers_mcp.service.get_paper_details",
+            new_callable=AsyncMock,
+            return_value=sample_paper_details,
+        ):
+            async with Client(mcp) as client:
+                result = await client.call_tool("get_paper", {"paper_id": "abc123"})
+
+        assert result.is_error is False
+        assert result.data["paper_id"] == "abc123"
+        expected_tldr = "This paper introduces the Transformer architecture."
+        assert result.data["tldr"] == expected_tldr
+
+    @pytest.mark.asyncio
+    async def test_search_tool_surfaces_service_errors(self) -> None:
+        """Service errors are returned as a structured error payload."""
+        error = ServiceError(code="rate_limit", message="Rate limit exceeded")
+        with patch(
+            "papers_mcp.service.search_papers",
+            new_callable=AsyncMock,
+            return_value=error,
+        ):
+            async with Client(mcp) as client:
+                result = await client.call_tool("search_papers", {"query": "x"})
+
+        assert result.data["error"] is True
+        assert result.data["code"] == "rate_limit"
+
+
+class TestMain:
+    """Tests for the CLI entry point and --debug flag."""
+
+    def test_debug_flag_enables_debug_logging(self) -> None:
+        """--debug configures debug-level logging before starting the server."""
+        with (
+            patch("papers_mcp.server.mcp.run") as mock_run,
+            patch("papers_mcp.server.logging.basicConfig") as mock_basic,
+            patch("sys.argv", ["papers-mcp", "--debug"]),
+        ):
+            main()
+
+        mock_run.assert_called_once_with()
+        assert mock_basic.call_args.kwargs["level"] == logging.DEBUG
+
+    def test_default_uses_info_logging(self) -> None:
+        """Without --debug the server starts with info-level logging."""
+        with (
+            patch("papers_mcp.server.mcp.run") as mock_run,
+            patch("papers_mcp.server.logging.basicConfig") as mock_basic,
+            patch("sys.argv", ["papers-mcp"]),
+        ):
+            main()
+
+        mock_run.assert_called_once_with()
+        assert mock_basic.call_args.kwargs["level"] == logging.INFO
