@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Cancel superseded runs on the same ref to save CI minutes.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: check (lint · types · tests)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
+          enable-cache: true
+      # --frozen installs the committed uv.lock exactly, so a dependency-patch
+      # PR is verified against the lockfile it ships — not a fresh re-resolve.
+      - run: uv sync --all-extras --frozen
+      - run: uv run ruff check src tests
+      - run: uv run mypy src tests
+      - run: uv run pytest tests/ -v
