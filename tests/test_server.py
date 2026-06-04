@@ -382,8 +382,10 @@ class TestMcpServer:
                 )
 
         assert result.is_error is False
-        first = result.data["papers"][0]
-        assert result.data["total"] == 100
+        # fastmcp >=2.14 wraps a union return type under a "result" key.
+        data = result.structured_content["result"]
+        first = data["papers"][0]
+        assert data["total"] == 100
         assert first["title"] == "Attention Is All You Need"
         assert first["pdf_url"] == "https://arxiv.org/pdf/1706.03762.pdf"
 
@@ -402,9 +404,10 @@ class TestMcpServer:
                 result = await client.call_tool("get_paper", {"paper_id": "abc123"})
 
         assert result.is_error is False
-        assert result.data["paper_id"] == "abc123"
+        data = result.structured_content["result"]
+        assert data["paper_id"] == "abc123"
         expected_tldr = "This paper introduces the Transformer architecture."
-        assert result.data["tldr"] == expected_tldr
+        assert data["tldr"] == expected_tldr
 
     @pytest.mark.asyncio
     async def test_search_tool_surfaces_service_errors(self) -> None:
@@ -418,8 +421,9 @@ class TestMcpServer:
             async with Client(mcp) as client:
                 result = await client.call_tool("search_papers", {"query": "x"})
 
-        assert result.data["error"] is True
-        assert result.data["code"] == "rate_limit"
+        data = result.structured_content["result"]
+        assert data["error"] is True
+        assert data["code"] == "rate_limit"
 
 
 class TestMain:
